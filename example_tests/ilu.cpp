@@ -618,7 +618,11 @@ void factorize_separators_pass(ILUFact* ilu, const std::vector<int>& diag_ptr) {
             ilu->lu_val[k] /= diag_val;
             double l_val = ilu->lu_val[k];
 
-            int m = diag_m + 1;
+            // For local pivots: start from row beginning so cross-updates between L entries work.
+            // For E-block pivots: start from diagonal — ext_U_col can map to already-processed
+            // local L positions (e.g. 3D Laplacian last boundary layer), starting before
+            // diag_m would corrupt them; by this point all local lower-tri entries are frozen.
+            int m = is_e_block ? diag_m : ilu->lu_rowptr[perm_i];
             int m_end = ilu->lu_rowptr[perm_i + 1];
 
             for (int j = pivot_start + 1; j < pivot_end; j++) {
