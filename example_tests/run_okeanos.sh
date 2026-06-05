@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=dasilu
 #SBATCH --account=g105-2692
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=16
 #SBATCH --time=00:30:00
 #SBATCH --output=dasilu_%j.out
@@ -23,7 +23,7 @@ make
 MATRICES="lap2d_1024.mtx lap2d_10k.mtx lap2d_100k.mtx lap3d_1k.mtx lap3d_10k.mtx band_5k.mtx"
 
 # Strong scaling: fix matrix, vary process count
-for NP in 1 2 4 8 16; do
+for NP in 1 2 4 8 16 32 64; do
     echo ""
     echo "########## P = ${NP} ##########"
     for MAT in $MATRICES; do
