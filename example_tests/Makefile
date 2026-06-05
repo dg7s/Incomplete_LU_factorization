@@ -1,5 +1,5 @@
 CXX			= CC
-CXXFLAGS	= -O3 -Wall -g
+CXXFLAGS	= -O3 -Wall -g -std=c++17
 
 DEPS 	= ilu.h
 

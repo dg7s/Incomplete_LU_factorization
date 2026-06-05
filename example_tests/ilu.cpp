@@ -926,7 +926,6 @@ struct ILUFact* ILU_factorize(int N, int nnz, int* row, int* col, double* val) {
     ILUFact* ilu = new ILUFact();
     ilu->world_size = world_size;
     ilu->rank = rank;
-    ilu->N = N;
 
     // Rank 0 read and sort COO data
     std::vector<int> row_global, col_global;
@@ -939,8 +938,9 @@ struct ILUFact* ILU_factorize(int N, int nnz, int* row, int* col, double* val) {
         sort_coo(row_global, col_global, val_global);
     }
 
-    // Broadcast matrix size to all ranks
+    // Broadcast matrix size to all ranks before storing in struct
     MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    ilu->N = N;
 
     // Compute row distribution
     ilu->local_start = rank * N / world_size;
