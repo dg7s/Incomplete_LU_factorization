@@ -708,6 +708,15 @@ void iterative_separator_factorization(ILUFact* ilu) {
     int iter = 0;
     bool converged = false;
 
+    // Snapshot of separator lu_val as it stands after factorize_interior (original A values
+    // for those rows).  Must reset before every pass so the L-entry divisions and U-entry
+    // subtractions always start from the same base — without this, repeated calls would
+    // divide L entries by U_ii again each iteration, driving them to zero.
+    const int sep_val_start = ilu->lu_rowptr[ilu->n_int];
+    const int sep_val_end   = ilu->lu_rowptr[local_n];
+    std::vector<double> orig_sep_lu_val(ilu->lu_val.begin() + sep_val_start,
+                                        ilu->lu_val.begin() + sep_val_end);
+
     std::vector<double> prev_U_sep(ilu->lu_val.size(), 0.0);
 
     while (iter < max_iter && !converged) {
@@ -729,11 +738,11 @@ void iterative_separator_factorization(ILUFact* ilu) {
                 int local_row = global_row - ilu->local_start;
                 int perm_i = ilu->inv_perm[local_row];
                 int diag_m = diag_ptr[perm_i];
-                
+
                 for (int k = diag_m; k < ilu->lu_rowptr[perm_i + 1]; k++) {
                     int col_idx = ilu->lu_col[k];
                     if (col_idx >= local_n && col_idx < local_n + num_ext_fwd) continue;
-                    
+
                     send_buffer[buf_idx++] = ilu->lu_val[k];
                 }
             }
@@ -752,18 +761,24 @@ void iterative_separator_factorization(ILUFact* ilu) {
             MPI_Waitall(mpi_requests.size(), mpi_requests.data(), MPI_STATUSES_IGNORE);
         }
 
+        // Save current factorized U values for convergence comparison, then reset
+        // separator rows to original A so factorize_separators_pass always starts clean.
         for (int perm_i = ilu->n_int; perm_i < local_n; perm_i++) {
             int diag_m = diag_ptr[perm_i];
             if (diag_m == -1) continue;
-            
+
             for (int k = diag_m; k < ilu->lu_rowptr[perm_i + 1]; k++) {
                 int col_idx = ilu->lu_col[k];
                 // Skip E-block columns
                 if (col_idx >= local_n && col_idx < local_n + num_ext_fwd) continue;
-                
+
                 prev_U_sep[k] = ilu->lu_val[k];
             }
         }
+
+        // Reset all separator row entries (L and U) to original A values
+        std::copy(orig_sep_lu_val.begin(), orig_sep_lu_val.end(),
+                  ilu->lu_val.begin() + sep_val_start);
 
         factorize_separators_pass(ilu, diag_ptr);
 
