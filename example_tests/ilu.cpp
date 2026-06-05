@@ -925,12 +925,19 @@ void setup_ext_U_structure(ILUFact* ilu) {
             for (int jj = 0; jj < row_size; jj++) {
                 int gc = recv_col_buf[col_pos++];
                 int enc;
-                if (gc < ilu->local_start)
-                    enc = local_n + ilu->ext_col_to_local_fwd[gc];
-                else if (gc < ilu->local_end)
+                if (gc < ilu->local_start) {
+                    auto it = ilu->ext_col_to_local_fwd.find(gc);
+                    enc = (it != ilu->ext_col_to_local_fwd.end())
+                        ? local_n + it->second
+                        : -1;  // not referenced by any local row; skip in factorize pass
+                } else if (gc < ilu->local_end) {
                     enc = ilu->inv_perm[gc - ilu->local_start];
-                else
-                    enc = local_n + num_ext_fwd + ilu->ext_col_to_local_bwd[gc];
+                } else {
+                    auto it = ilu->ext_col_to_local_bwd.find(gc);
+                    enc = (it != ilu->ext_col_to_local_bwd.end())
+                        ? local_n + num_ext_fwd + it->second
+                        : -1;  // not referenced by any local row; skip in factorize pass
+                }
                 ilu->ext_U_col[row_start + jj] = enc;
             }
         }
@@ -1318,7 +1325,9 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
         if (global_delta_sq <= tol * tol * global_norm_sq) break;
     }
 
-    // Solve interior rows exactly once after separator convergence (no F-block dependencies)
+    // Solve interior rows backward once; interior rows can have F-block U entries
+    // (cols >= local_end) pointing to higher-ranked ranks whose x values are now
+    // in recv_buf_bwd from the last iteration of the separator convergence loop above.
     for (int perm_i = ilu->n_int - 1; perm_i >= 0; perm_i--) {
         double sum = 0.0;
         int diag_m = diag_ptr[perm_i];
@@ -1327,6 +1336,9 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             int col = ilu->lu_col[k];
             if (col < local_n) {
                 sum += ilu->lu_val[k] * x_perm[col];
+            } else if (col >= local_n + num_ext_fwd) {
+                int ext_idx = col - (local_n + num_ext_fwd);
+                sum += ilu->lu_val[k] * ilu->recv_buf_bwd[ext_idx];
             }
         }
         x_perm[perm_i] = (y_perm[perm_i] - sum) / diag_val;
