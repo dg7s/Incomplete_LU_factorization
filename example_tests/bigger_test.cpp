@@ -135,7 +135,8 @@ static int check_factorization_sampled(ILUFact* ilu,
 
 // ---- Solve roundtrip check --------------------------------------------------
 
-static bool check_solve(ILUFact* ilu, int N, const double* v_global, int P) {
+static bool check_solve(ILUFact* ilu, int N, const double* v_global, int P,
+                        const char* vec_name = "") {
     int rank; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     int first = rank_first_row(rank, N, P);
     int local_n = rank_first_row(rank + 1, N, P) - first;
@@ -146,13 +147,39 @@ static bool check_solve(ILUFact* ilu, int N, const double* v_global, int P) {
     ILU_solve(ilu, b.data(), x.data());
     ILU_multiply(ilu, x.data(), res.data());
 
+    double local_max_err = 0.0;
     int ok = 1;
+    int fail_idx = -1;
     for (int i = 0; i < local_n; i++) {
-        if (fabs(b[i] - res[i]) > EPS) { ok = 0; break; }
+        double e = fabs(b[i] - res[i]);
+        if (e > local_max_err) { local_max_err = e; }
+        if (e > EPS && ok) { ok = 0; fail_idx = i; }
     }
+
+    // Gather max error and which rank failed
+    double global_max_err = 0.0;
+    MPI_Reduce(&local_max_err, &global_max_err, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
     int global_ok;
     MPI_Reduce(&ok, &global_ok, 1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
     MPI_Bcast(&global_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (!global_ok) {
+        // Gather per-rank max error to rank 0 for diagnosis
+        vector<double> per_rank_err(rank == 0 ? P : 0);
+        MPI_Gather(&local_max_err, 1, MPI_DOUBLE,
+                   rank == 0 ? per_rank_err.data() : nullptr, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        if (rank == 0) {
+            printf("    DIAG vec='%s' max_err=%.3e fwd=%d bwd=%d | per-rank:",
+                   vec_name, global_max_err,
+                   ILU_last_fwd_iters(ilu), ILU_last_bwd_iters(ilu));
+            for (int r = 0; r < P; r++)
+                if (per_rank_err[r] > EPS * 0.1)
+                    printf(" r%d=%.2e", r, per_rank_err[r]);
+            printf("\n");
+        }
+    }
+
     return global_ok == 1;
 }
 
@@ -216,16 +243,16 @@ static void test_matrix(const char* filename) {
 
     // Structured vectors
     for (int i = 0; i < N; i++) v[i] = 1.0;
-    if (check_solve(ilu, N, v.data(), P)) sv_pass++;
+    if (check_solve(ilu, N, v.data(), P, "ones")) sv_pass++;
 
     for (int i = 0; i < N; i++) v[i] = (double)i;
-    if (check_solve(ilu, N, v.data(), P)) sv_pass++;
+    if (check_solve(ilu, N, v.data(), P, "ramp")) sv_pass++;
 
     for (int i = 0; i < N; i++) v[i] = (i % 2 == 0) ? 1.0 : -1.0;
-    if (check_solve(ilu, N, v.data(), P)) sv_pass++;
+    if (check_solve(ilu, N, v.data(), P, "alt")) sv_pass++;
 
     for (int i = 0; i < N; i++) v[i] = sin((double)i);
-    if (check_solve(ilu, N, v.data(), P)) sv_pass++;
+    if (check_solve(ilu, N, v.data(), P, "sin")) sv_pass++;
 
     // Random vectors
     mt19937 rng(999);
@@ -234,7 +261,8 @@ static void test_matrix(const char* filename) {
         if (rank == 0)
             for (int i = 0; i < N; i++) v[i] = dist(rng);
         MPI_Bcast(v.data(), N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        if (check_solve(ilu, N, v.data(), P)) sv_pass++;
+        char name[16]; snprintf(name, sizeof(name), "rand%d", t);
+        if (check_solve(ilu, N, v.data(), P, name)) sv_pass++;
     }
 
     if (rank == 0)

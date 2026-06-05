@@ -69,6 +69,10 @@ struct ILUFact {
     // MPI Request Storage
     std::vector<MPI_Request> mpi_requests_fwd;
     std::vector<MPI_Request> mpi_requests_bwd;
+
+    // Last solve iteration counts (for diagnostics)
+    int last_fwd_iters = 0;
+    int last_bwd_iters = 0;
 };
 
 // Only rank 0 calls this.
@@ -712,7 +716,7 @@ void iterative_separator_factorization(ILUFact* ilu) {
     std::vector<MPI_Request> mpi_requests;
     mpi_requests.reserve(num_fwd_src + num_fwd_dst);
 
-    int max_iter = 50;
+    int max_iter = 100;
     double tol = 1e-8;
     int iter = 0;
     bool converged = false;
@@ -817,16 +821,17 @@ void iterative_separator_factorization(ILUFact* ilu) {
         MPI_Allreduce(&local_norm_sq, &global_norm_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
         double relative_error = sqrt(global_diff_sq) / (sqrt(global_norm_sq) + 1e-20);
-        if (ilu->rank == 0) {
-            printf("Iter %d: Relative change in U separators = %e\n", iter, relative_error);
-        }
 
         if (relative_error < tol) {
+            if (ilu->rank == 0)
+                printf("  Factorization converged in %d iters (rel=%e)\n", iter + 1, relative_error);
             converged = true;
         }
 
         iter++;
     }
+    if (!converged && ilu->rank == 0)
+        printf("  WARNING: Factorization did NOT converge in %d iters\n", max_iter);
 }
 
 // One-time setup: exchange the sparsity structure of external U rows.
@@ -1074,6 +1079,16 @@ struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, co
     // Setup ext_U structure for separator factorization
     setup_ext_U_structure(ilu);
 
+    {
+        int min_n_int = ilu->n_int;
+        MPI_Reduce(rank == 0 ? MPI_IN_PLACE : &min_n_int, &min_n_int,
+                   1, MPI_INT, MPI_MIN, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            printf("  Setup: local_n=%d n_int=%d n_sep=%d k_fwd=%d k_bwd=%d min_n_int=%d\n",
+                   ilu->local_n, ilu->n_int, ilu->n_sep,
+                   (int)ilu->ext_cols_fwd.size(), (int)ilu->ext_cols_bwd.size(), min_n_int);
+    }
+
     // Interior factorization
     factorize_interior(ilu->lu_rowptr, ilu->lu_col, ilu->lu_val,
                        ilu->local_n, ilu->n_int);
@@ -1128,7 +1143,8 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     std::vector<double> flat_send_buf(total_send, 0.0);
 
     double tol = 1e-8;
-    int max_iter = 50;
+    int max_iter = 100;
+    int fwd_iters_taken = max_iter;
 
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator y values for higher-ranked neighbors
@@ -1204,8 +1220,14 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
             MPI_Waitall(send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE);
         }
 
-        if (global_delta_sq <= tol * tol * global_norm_sq) break;
+        if (global_delta_sq <= tol * tol * global_norm_sq) {
+            fwd_iters_taken = iter + 1;
+            break;
+        }
     }
+    ilu->last_fwd_iters = fwd_iters_taken;
+    if (fwd_iters_taken == max_iter && ilu->rank == 0)
+        printf("  WARNING: fwd_sweep did not converge in %d iters\n", max_iter);
 }
 
 void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
@@ -1253,7 +1275,8 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     std::vector<double> flat_send_buf(total_send, 0.0);
 
     double tol = 1e-8;
-    int max_iter = 50;
+    int max_iter = 100;
+    int bwd_iters_taken = max_iter;
 
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator x values for lower-ranked neighbors
@@ -1331,8 +1354,14 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             MPI_Waitall(send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE);
         }
 
-        if (global_delta_sq <= tol * tol * global_norm_sq) break;
+        if (global_delta_sq <= tol * tol * global_norm_sq) {
+            bwd_iters_taken = iter + 1;
+            break;
+        }
     }
+    ilu->last_bwd_iters = bwd_iters_taken;
+    if (bwd_iters_taken == max_iter && ilu->rank == 0)
+        printf("  WARNING: bwd_sweep did not converge in %d iters\n", max_iter);
 
 }
 
@@ -1563,3 +1592,6 @@ void ILU_free(ILUFact* ilu) {
         delete ilu;
     }
 }
+
+int ILU_last_fwd_iters(ILUFact* ilu) { return ilu->last_fwd_iters; }
+int ILU_last_bwd_iters(ILUFact* ilu) { return ilu->last_bwd_iters; }
