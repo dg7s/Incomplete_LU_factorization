@@ -624,19 +624,28 @@ void factorize_separators_pass(ILUFact* ilu, const std::vector<int>& diag_ptr) {
             // diag_m would corrupt them; by this point all local lower-tri entries are frozen.
             int m = is_e_block ? diag_m : ilu->lu_rowptr[perm_i];
             int m_end = ilu->lu_rowptr[perm_i + 1];
+            // m_e: pointer for E-block entries in current row (only used for E-block pivots).
+            // After encoding, lu_col is sorted local [0,local_n) < E-block [local_n,local_n+k_fwd).
+            // k itself is an E-block entry, so k+1 is the next E-block (or F-block/end) — never local.
+            int m_e = k + 1;
 
             for (int j = pivot_start + 1; j < pivot_end; j++) {
                 int col_j = pivot_cols[j];
-                // Skip E-block of pivot row
-                if (col_j >= local_n && col_j < local_n + num_ext_fwd) continue;
-                while (m < m_end) {
-                    int mc = ilu->lu_col[m];
-                    if (mc >= local_n && mc < local_n + num_ext_fwd) { m++; continue; }
-                    if (mc >= col_j) break;  // stop AT col_j, not past it
-                    m++;
-                }
-                if (m < m_end && ilu->lu_col[m] == col_j) {
-                    ilu->lu_val[m] -= l_val * pivot_vals[j];
+                if (is_e_block && col_j >= local_n && col_j < local_n + num_ext_fwd) {
+                    // E-block column in pivot row: update matching E-block entry in current row
+                    while (m_e < m_end && ilu->lu_col[m_e] < col_j) m_e++;
+                    if (m_e < m_end && ilu->lu_col[m_e] == col_j)
+                        ilu->lu_val[m_e] -= l_val * pivot_vals[j];
+                } else {
+                    // Local or F-block column: advance m, skipping E-block entries
+                    while (m < m_end) {
+                        int mc = ilu->lu_col[m];
+                        if (mc >= local_n && mc < local_n + num_ext_fwd) { m++; continue; }
+                        if (mc >= col_j) break;
+                        m++;
+                    }
+                    if (m < m_end && ilu->lu_col[m] == col_j)
+                        ilu->lu_val[m] -= l_val * pivot_vals[j];
                 }
             }
         }
@@ -944,7 +953,7 @@ void setup_ext_U_structure(ILUFact* ilu) {
     }
 }
 
-struct ILUFact* ILU_factorize(int N, int nnz, int* row, int* col, double* val) {
+struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, const double* val) {
     int world_size, rank;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1217,8 +1226,8 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
         }
     }
 
-    // Initialize separator x and external receive buffer
-    for (int perm_i = ilu->n_int; perm_i < local_n; perm_i++)
+    // Initialize all x and external receive buffer
+    for (int perm_i = 0; perm_i < local_n; perm_i++)
         x_perm[perm_i] = 0.0;
     ilu->recv_buf_bwd.assign(num_ext_bwd, 0.0);
 
@@ -1292,9 +1301,9 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
         }
 
-        // Update separator rows (backward): Gauss-Seidel for local, Jacobi for F-block
+        // Update all rows backward: Gauss-Seidel for local, Jacobi for F-block
         double delta_sq = 0.0, norm_sq = 0.0;
-        for (int perm_i = local_n - 1; perm_i >= ilu->n_int; perm_i--) {
+        for (int perm_i = local_n - 1; perm_i >= 0; perm_i--) {
             double sum = 0.0;
             int diag_m = diag_ptr[perm_i];
             double diag_val = ilu->lu_val[diag_m];
@@ -1325,27 +1334,9 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
         if (global_delta_sq <= tol * tol * global_norm_sq) break;
     }
 
-    // Solve interior rows backward once; interior rows can have F-block U entries
-    // (cols >= local_end) pointing to higher-ranked ranks whose x values are now
-    // in recv_buf_bwd from the last iteration of the separator convergence loop above.
-    for (int perm_i = ilu->n_int - 1; perm_i >= 0; perm_i--) {
-        double sum = 0.0;
-        int diag_m = diag_ptr[perm_i];
-        double diag_val = ilu->lu_val[diag_m];
-        for (int k = diag_m + 1; k < ilu->lu_rowptr[perm_i + 1]; k++) {
-            int col = ilu->lu_col[k];
-            if (col < local_n) {
-                sum += ilu->lu_val[k] * x_perm[col];
-            } else if (col >= local_n + num_ext_fwd) {
-                int ext_idx = col - (local_n + num_ext_fwd);
-                sum += ilu->lu_val[k] * ilu->recv_buf_bwd[ext_idx];
-            }
-        }
-        x_perm[perm_i] = (y_perm[perm_i] - sum) / diag_val;
-    }
 }
 
-void ILU_solve(ILUFact* ilu, double* b, double* x) {
+void ILU_solve(ILUFact* ilu, const double* b, double* x) {
     int local_n = ilu->local_n;
 
     std::vector<double> b_perm(local_n);
@@ -1362,7 +1353,7 @@ void ILU_solve(ILUFact* ilu, double* b, double* x) {
         x[i] = x_perm[ilu->inv_perm[i]];
 }
 
-void ILU_multiply(ILUFact* ilu, double* b, double* res) {
+void ILU_multiply(ILUFact* ilu, const double* b, double* res) {
     int num_bwd_src = ilu->bwd_src_ranks.size();
     int num_bwd_dst = ilu->bwd_dst_ranks.size();
     int num_fwd_src = ilu->fwd_src_ranks.size();
