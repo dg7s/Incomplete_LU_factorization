@@ -8,10 +8,8 @@
 #SBATCH --error=dasilu_%j.err
 
 set -e
-cd "$(dirname "$0")"
 
 # Build
-make clean
 make
 
 # Generate matrices
