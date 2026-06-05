@@ -1,0 +1,17 @@
+# Build outputs
+*.o
+*.out
+*.err
+
+# Compiled binaries
+example_tests/example_test
+example_tests/bigger_test
+example_tests/gen_matrix
+
+# Generated test matrices (can be reproduced with gen_matrix)
+example_tests/*.mtx
+!example_tests/tridiag.mtx
+
+# Slurm output logs
+dasilu_*.out
+results_*.txt
