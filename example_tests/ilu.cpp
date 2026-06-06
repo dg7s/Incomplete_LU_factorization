@@ -579,74 +579,84 @@ void factorize_interior(std::vector<int>& lu_rowptr,
 
 void factorize_separators_pass(ILUFact* ilu, const std::vector<int>& diag_ptr) {
     const int local_n = ilu->local_n;
-    const int num_ext_fwd = ilu->ext_cols_fwd.size();
+    const int num_ext_fwd = (int)ilu->ext_cols_fwd.size();
 
     for (int perm_i = ilu->n_int; perm_i < local_n; perm_i++) {
-        int diag_m = diag_ptr[perm_i];
-        if (diag_m == -1) continue;
+        if (diag_ptr[perm_i] == -1) continue;
 
-        // Iterate over entire row, classify entries into local L and E-block
-        for (int k = ilu->lu_rowptr[perm_i]; k < ilu->lu_rowptr[perm_i + 1]; k++) {
+        const int row_start = ilu->lu_rowptr[perm_i];
+        const int row_end   = ilu->lu_rowptr[perm_i + 1];
+
+        // Pass 1: E-block pivots (global columns < local_start).
+        // These must be applied before local lower-tri pivots because their global
+        // column indices are smaller. For band-like matrices, E-block pivot rows
+        // have entries at local L positions — those corrections must land before
+        // the local entries are divided by their own diagonal.
+        for (int k = row_start; k < row_end; k++) {
             int col_idx = ilu->lu_col[k];
-            
-            bool is_local_lower = (col_idx < perm_i);
-            bool is_e_block = (col_idx >= local_n && col_idx < local_n + num_ext_fwd);
-            if (!is_local_lower && !is_e_block) continue;
+            if (col_idx < local_n) continue;              // local — handled in pass 2
+            if (col_idx >= local_n + num_ext_fwd) break;  // F-block — past E-block range
 
-            int pivot_start, pivot_end;
-            const int* pivot_cols;
-            const double* pivot_vals;
-            double diag_val;
-
-            if (is_e_block) {
-                int ext_idx = col_idx - local_n;
-                pivot_start = ilu->ext_U_rowptr[ext_idx];
-                pivot_end = ilu->ext_U_rowptr[ext_idx + 1];
-                pivot_cols = ilu->ext_U_col.data();
-                pivot_vals = ilu->ext_U_val.data();
-                diag_val = pivot_vals[pivot_start];
-            } else {
-                int pivot_diag = diag_ptr[col_idx];
-                if (pivot_diag == -1) continue;
-                pivot_start = pivot_diag;
-                pivot_end = ilu->lu_rowptr[col_idx + 1];
-                pivot_cols = ilu->lu_col.data();
-                pivot_vals = ilu->lu_val.data();
-                diag_val = pivot_vals[pivot_diag];
-            }
+            int ext_idx    = col_idx - local_n;
+            int pivot_start = ilu->ext_U_rowptr[ext_idx];
+            int pivot_end   = ilu->ext_U_rowptr[ext_idx + 1];
+            double diag_val = ilu->ext_U_val[pivot_start];
 
             ilu->lu_val[k] /= diag_val;
             double l_val = ilu->lu_val[k];
 
-            // For local pivots: start from row beginning so cross-updates between L entries work.
-            // For E-block pivots: start from diagonal — ext_U_col can map to already-processed
-            // local L positions (e.g. 3D Laplacian last boundary layer), starting before
-            // diag_m would corrupt them; by this point all local lower-tri entries are frozen.
-            int m = is_e_block ? diag_m : ilu->lu_rowptr[perm_i];
-            int m_end = ilu->lu_rowptr[perm_i + 1];
-            // m_e: pointer for E-block entries in current row (only used for E-block pivots).
-            // After encoding, lu_col is sorted local [0,local_n) < E-block [local_n,local_n+k_fwd).
-            // k itself is an E-block entry, so k+1 is the next E-block (or F-block/end) — never local.
-            int m_e = k + 1;
+            int m_e = k + 1;  // monotonic pointer for E-block entries (ext_cols_fwd is sorted)
 
             for (int j = pivot_start + 1; j < pivot_end; j++) {
-                int col_j = pivot_cols[j];
-                if (is_e_block && col_j >= local_n && col_j < local_n + num_ext_fwd) {
-                    // E-block column in pivot row: update matching E-block entry in current row
-                    while (m_e < m_end && ilu->lu_col[m_e] < col_j) m_e++;
-                    if (m_e < m_end && ilu->lu_col[m_e] == col_j)
-                        ilu->lu_val[m_e] -= l_val * pivot_vals[j];
+                int col_j = ilu->ext_U_col[j];
+                if (col_j == -1) continue;
+
+                if (col_j >= local_n && col_j < local_n + num_ext_fwd) {
+                    // E-block column: ext_col_to_local_fwd preserves sorted order,
+                    // so the monotonic m_e pointer is safe here.
+                    while (m_e < row_end && ilu->lu_col[m_e] < col_j) m_e++;
+                    if (m_e < row_end && ilu->lu_col[m_e] == col_j)
+                        ilu->lu_val[m_e] -= l_val * ilu->ext_U_val[j];
                 } else {
-                    // Local or F-block column: advance m, skipping E-block entries
-                    while (m < m_end) {
-                        int mc = ilu->lu_col[m];
-                        if (mc >= local_n && mc < local_n + num_ext_fwd) { m++; continue; }
-                        if (mc >= col_j) break;
-                        m++;
+                    // Local or F-block column: inv_perm scrambles encoded indices so
+                    // col_j values are not monotone. A monotonic pointer would miss
+                    // entries when col_j jumps backwards. Use a full linear scan instead.
+                    for (int s = row_start; s < row_end; s++) {
+                        if (ilu->lu_col[s] == col_j) {
+                            ilu->lu_val[s] -= l_val * ilu->ext_U_val[j];
+                            break;
+                        }
                     }
-                    if (m < m_end && ilu->lu_col[m] == col_j)
-                        ilu->lu_val[m] -= l_val * pivot_vals[j];
                 }
+            }
+        }
+
+        // Pass 2: local lower-tri pivots (global columns in [local_start, row_global)).
+        // Local L entries already have their E-block corrections from pass 1.
+        for (int k = row_start; k < row_end; k++) {
+            int col_idx = ilu->lu_col[k];
+            if (col_idx >= perm_i) break;  // past local lower-tri
+
+            int pivot_diag = diag_ptr[col_idx];
+            if (pivot_diag == -1) continue;
+
+            ilu->lu_val[k] /= ilu->lu_val[pivot_diag];
+            double l_val = ilu->lu_val[k];
+
+            int m     = row_start;
+            int m_end = row_end;
+
+            for (int j = pivot_diag + 1; j < ilu->lu_rowptr[col_idx + 1]; j++) {
+                int col_j = ilu->lu_col[j];
+                // Advance m skipping E-block (they have smaller global cols, already done)
+                while (m < m_end) {
+                    int mc = ilu->lu_col[m];
+                    if (mc >= local_n && mc < local_n + num_ext_fwd) { m++; continue; }
+                    if (mc >= col_j) break;
+                    m++;
+                }
+                if (m < m_end && ilu->lu_col[m] == col_j)
+                    ilu->lu_val[m] -= l_val * ilu->lu_val[j];
             }
         }
     }
