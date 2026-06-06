@@ -70,11 +70,6 @@ struct ILUFact {
     // Computed once after factorization; reused by every ILU_backward_sweep and ILU_multiply
     // call to avoid O(nnz/P) linear scan per invocation.
     std::vector<int> diag_ptr;
-
-    // Pre-allocated MPI request buffers reused across solve iterations to avoid
-    // per-iteration heap allocation inside the Gauss-Seidel loop.
-    std::vector<MPI_Request> mpi_requests_fwd;
-    std::vector<MPI_Request> mpi_requests_bwd;
 };
 
 // Only rank 0 calls this.
@@ -1103,11 +1098,6 @@ struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, co
         for (int k = ilu->lu_rowptr[i]; k < ilu->lu_rowptr[i + 1]; k++)
             if (ilu->lu_col[k] == i) { ilu->diag_ptr[i] = k; break; }
 
-    // Pre-size MPI request vectors to their maximum possible use so the solve
-    // loops can call reserve() rather than construct a new vector each iteration.
-    ilu->mpi_requests_fwd.reserve(ilu->fwd_src_ranks.size() + ilu->fwd_dst_ranks.size());
-    ilu->mpi_requests_bwd.reserve(ilu->bwd_src_ranks.size() + ilu->bwd_dst_ranks.size());
-
     return ilu;
 }
 
@@ -1164,12 +1154,6 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     double tol = 1e-10;
     int max_iter = 1000;
 
-    // Pre-allocate request vectors once; reuse across iterations via clear().
-    std::vector<MPI_Request>& recv_reqs = ilu->mpi_requests_fwd;
-    std::vector<MPI_Request> send_reqs;
-    recv_reqs.reserve(num_fwd_src);
-    send_reqs.reserve(num_fwd_dst);
-
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator y values for higher-ranked neighbors
         int send_idx = 0;
@@ -1181,7 +1165,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
             }
         }
 
-        recv_reqs.clear();
+        std::vector<MPI_Request> recv_reqs, send_reqs;
         for (int i = 0; i < num_fwd_src; i++) {
             if (recv_counts[i] > 0) {
                 MPI_Request req;
@@ -1191,7 +1175,6 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
             }
         }
 
-        send_reqs.clear();
         for (int i = 0; i < num_fwd_dst; i++) {
             if (send_counts[i] > 0) {
                 MPI_Request req;
@@ -1289,12 +1272,6 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     double tol = 1e-10;
     int max_iter = 1000;
 
-    // Pre-allocate request vectors once; reuse across iterations via clear().
-    std::vector<MPI_Request>& recv_reqs = ilu->mpi_requests_bwd;
-    std::vector<MPI_Request> send_reqs;
-    recv_reqs.reserve(num_bwd_src);
-    send_reqs.reserve(num_bwd_dst);
-
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator x values for lower-ranked neighbors
         int send_idx = 0;
@@ -1306,7 +1283,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
         }
 
-        recv_reqs.clear();
+        std::vector<MPI_Request> recv_reqs, send_reqs;
         for (int i = 0; i < num_bwd_src; i++) {
             if (recv_counts[i] > 0) {
                 MPI_Request req;
@@ -1316,7 +1293,6 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
         }
 
-        send_reqs.clear();
         for (int i = 0; i < num_bwd_dst; i++) {
             if (send_counts[i] > 0) {
                 MPI_Request req;
