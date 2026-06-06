@@ -1164,6 +1164,12 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     double tol = 1e-10;
     int max_iter = 1000;
 
+    // Pre-allocate request vectors once; reuse across iterations via clear().
+    std::vector<MPI_Request>& recv_reqs = ilu->mpi_requests_fwd;
+    std::vector<MPI_Request> send_reqs;
+    recv_reqs.reserve(num_fwd_src);
+    send_reqs.reserve(num_fwd_dst);
+
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator y values for higher-ranked neighbors
         int send_idx = 0;
@@ -1175,8 +1181,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
             }
         }
 
-        std::vector<MPI_Request> recv_reqs;
-        recv_reqs.reserve(num_fwd_src);
+        recv_reqs.clear();
         for (int i = 0; i < num_fwd_src; i++) {
             if (recv_counts[i] > 0) {
                 MPI_Request req;
@@ -1186,8 +1191,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
             }
         }
 
-        std::vector<MPI_Request> send_reqs;
-        send_reqs.reserve(num_fwd_dst);
+        send_reqs.clear();
         for (int i = 0; i < num_fwd_dst; i++) {
             if (send_counts[i] > 0) {
                 MPI_Request req;
@@ -1285,6 +1289,12 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     double tol = 1e-10;
     int max_iter = 1000;
 
+    // Pre-allocate request vectors once; reuse across iterations via clear().
+    std::vector<MPI_Request>& recv_reqs = ilu->mpi_requests_bwd;
+    std::vector<MPI_Request> send_reqs;
+    recv_reqs.reserve(num_bwd_src);
+    send_reqs.reserve(num_bwd_dst);
+
     for (int iter = 0; iter < max_iter; iter++) {
         // Pack current separator x values for lower-ranked neighbors
         int send_idx = 0;
@@ -1296,8 +1306,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
         }
 
-        std::vector<MPI_Request> recv_reqs;
-        recv_reqs.reserve(num_bwd_src);
+        recv_reqs.clear();
         for (int i = 0; i < num_bwd_src; i++) {
             if (recv_counts[i] > 0) {
                 MPI_Request req;
@@ -1307,8 +1316,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
         }
 
-        std::vector<MPI_Request> send_reqs;
-        send_reqs.reserve(num_bwd_dst);
+        send_reqs.clear();
         for (int i = 0; i < num_bwd_dst; i++) {
             if (send_counts[i] > 0) {
                 MPI_Request req;
