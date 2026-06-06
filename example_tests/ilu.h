@@ -12,7 +12,4 @@ void ILU_multiply(struct ILUFact* ilu, const double* b, double* res);
 
 void ILU_free(struct ILUFact* ilu);
 
-int ILU_last_fwd_iters(struct ILUFact* ilu);
-int ILU_last_bwd_iters(struct ILUFact* ilu);
-
 #endif //ILU_H
