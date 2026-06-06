@@ -66,7 +66,13 @@ struct ILUFact {
     std::vector<int> bwd_src_ranks;           // source ranks (higher)
     std::vector<std::vector<int>> bwd_recv_cols;  // columns to receive from each src rank
 
-    // MPI Request Storage
+    // Cached diagonal pointer: diag_ptr[i] = index k in lu_col where lu_col[k]==i, or -1.
+    // Computed once after factorization; reused by every ILU_backward_sweep and ILU_multiply
+    // call to avoid O(nnz/P) linear scan per invocation.
+    std::vector<int> diag_ptr;
+
+    // Pre-allocated MPI request buffers reused across solve iterations to avoid
+    // per-iteration heap allocation inside the Gauss-Seidel loop.
     std::vector<MPI_Request> mpi_requests_fwd;
     std::vector<MPI_Request> mpi_requests_bwd;
 };
@@ -1091,6 +1097,17 @@ struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, co
     // Separator factorization
     iterative_separator_factorization(ilu);
 
+    // Cache diagonal pointers once — reused by every ILU_backward_sweep / ILU_multiply call.
+    ilu->diag_ptr.assign(ilu->local_n, -1);
+    for (int i = 0; i < ilu->local_n; i++)
+        for (int k = ilu->lu_rowptr[i]; k < ilu->lu_rowptr[i + 1]; k++)
+            if (ilu->lu_col[k] == i) { ilu->diag_ptr[i] = k; break; }
+
+    // Pre-size MPI request vectors to their maximum possible use so the solve
+    // loops can call reserve() rather than construct a new vector each iteration.
+    ilu->mpi_requests_fwd.reserve(ilu->fwd_src_ranks.size() + ilu->fwd_dst_ranks.size());
+    ilu->mpi_requests_bwd.reserve(ilu->bwd_src_ranks.size() + ilu->bwd_dst_ranks.size());
+
     return ilu;
 }
 
@@ -1237,16 +1254,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     double global_y_sq = 0.0;
     MPI_Allreduce(&local_y_sq, &global_y_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-    // Diagonal precomputation
-    std::vector<int> diag_ptr(local_n, -1);
-    for (int i = 0; i < local_n; i++) {
-        for (int k = ilu->lu_rowptr[i]; k < ilu->lu_rowptr[i + 1]; k++) {
-            if (ilu->lu_col[k] == i) {
-                diag_ptr[i] = k;
-                break;
-            }
-        }
-    }
+    const std::vector<int>& diag_ptr = ilu->diag_ptr;  // cached; no recomputation
 
     // Initialize all x and external receive buffer
     for (int perm_i = 0; perm_i < local_n; perm_i++)
@@ -1390,16 +1398,7 @@ void ILU_multiply(ILUFact* ilu, const double* b, double* res) {
     for (int i = 0; i < local_n; i++)
         b_perm[ilu->inv_perm[i]] = b[i];
 
-    // Diagonal precomputation
-    std::vector<int> diag_ptr(local_n, -1);
-    for (int i = 0; i < local_n; i++) {
-        for (int k = ilu->lu_rowptr[i]; k < ilu->lu_rowptr[i + 1]; k++) {
-            if (ilu->lu_col[k] == i) {
-                diag_ptr[i] = k;
-                break;
-            }
-        }
-    }
+    const std::vector<int>& diag_ptr = ilu->diag_ptr;  // cached; no recomputation
 
     // Calculate z = U * b_perm
     // Receive F-block b values from higher ranks
