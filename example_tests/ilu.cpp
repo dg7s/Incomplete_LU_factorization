@@ -1105,6 +1105,14 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     int local_n = ilu->local_n;
     int num_ext_fwd = ilu->ext_cols_fwd.size();
 
+    // Wyliczenie normy globalnego wektora b do kryterium stopu (b_sq)
+    double local_b_sq = 0.0;
+    for (int i = 0; i < local_n; i++) {
+        local_b_sq += b_perm[i] * b_perm[i];
+    }
+    double global_b_sq = 0.0;
+    MPI_Allreduce(&local_b_sq, &global_b_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
     // Solve interior rows exactly once (no E-block lower-triangular dependencies)
     for (int perm_i = 0; perm_i < ilu->n_int; perm_i++) {
         double sum = 0.0;
@@ -1143,7 +1151,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     std::vector<double> flat_send_buf(total_send, 0.0);
 
     double tol = 1e-8;
-    int max_iter = 100;
+    int max_iter = 1000; // Zwiększony limit dla dużej liczby procesów (P=64)
     int fwd_iters_taken = max_iter;
 
     for (int iter = 0; iter < max_iter; iter++) {
@@ -1193,7 +1201,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
         }
 
         // Update separator rows: Gauss-Seidel for local, Jacobi for E-block
-        double delta_sq = 0.0, norm_sq = 0.0;
+        double local_res_sq = 0.0;
         for (int perm_i = ilu->n_int; perm_i < local_n; perm_i++) {
             double sum = 0.0;
             for (int k = ilu->lu_rowptr[perm_i]; k < ilu->lu_rowptr[perm_i + 1]; k++) {
@@ -1206,21 +1214,21 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
                 }
             }
             double new_val = b_perm[perm_i] - sum;
-            double delta = new_val - y_perm[perm_i];
-            delta_sq += delta * delta;
-            norm_sq  += new_val * new_val;
+            // Ponieważ L ma 1.0 na diagonali, różnica kroków jest równa residuum dla tego wiersza
+            double res_i = new_val - y_perm[perm_i]; 
+            local_res_sq += res_i * res_i;
             y_perm[perm_i] = new_val;
         }
 
-        double global_delta_sq = 0.0, global_norm_sq = 0.0;
-        MPI_Allreduce(&delta_sq, &global_delta_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        MPI_Allreduce(&norm_sq,  &global_norm_sq,  1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        double global_res_sq = 0.0;
+        MPI_Allreduce(&local_res_sq, &global_res_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
         if (!send_reqs.empty()) {
             MPI_Waitall(send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE);
         }
 
-        if (global_delta_sq <= tol * tol * global_norm_sq) {
+        // Warunek stopu oparty na prawdziwym błędzie b - Ly
+        if (global_res_sq <= tol * tol * global_b_sq) {
             fwd_iters_taken = iter + 1;
             break;
         }
@@ -1236,6 +1244,14 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     int local_n = ilu->local_n;
     int num_ext_fwd = ilu->ext_cols_fwd.size();
     int num_ext_bwd = ilu->ext_cols_bwd.size();
+
+    // Wyliczenie normy wektora odniesienia y do kryterium stopu (y_sq)
+    double local_y_sq = 0.0;
+    for (int i = 0; i < local_n; i++) {
+        local_y_sq += y_perm[i] * y_perm[i];
+    }
+    double global_y_sq = 0.0;
+    MPI_Allreduce(&local_y_sq, &global_y_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
     // Diagonal precomputation
     std::vector<int> diag_ptr(local_n, -1);
@@ -1275,7 +1291,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     std::vector<double> flat_send_buf(total_send, 0.0);
 
     double tol = 1e-8;
-    int max_iter = 100;
+    int max_iter = 1000; // Zwiększony limit dla dużej liczby procesów
     int bwd_iters_taken = max_iter;
 
     for (int iter = 0; iter < max_iter; iter++) {
@@ -1325,7 +1341,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
         }
 
         // Update all rows backward: Gauss-Seidel for local, Jacobi for F-block
-        double delta_sq = 0.0, norm_sq = 0.0;
+        double local_res_sq = 0.0;
         for (int perm_i = local_n - 1; perm_i >= 0; perm_i--) {
             double sum = 0.0;
             int diag_m = diag_ptr[perm_i];
@@ -1341,20 +1357,22 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
             }
             double new_val = (y_perm[perm_i] - sum) / diag_val;
             double delta = new_val - x_perm[perm_i];
-            delta_sq += delta * delta;
-            norm_sq  += new_val * new_val;
+            
+            // Prawdziwe residuum z uwzględnieniem wartości diagonali
+            double res_i = delta * diag_val; 
+            local_res_sq += res_i * res_i;
             x_perm[perm_i] = new_val;
         }
 
-        double global_delta_sq = 0.0, global_norm_sq = 0.0;
-        MPI_Allreduce(&delta_sq, &global_delta_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        MPI_Allreduce(&norm_sq,  &global_norm_sq,  1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        double global_res_sq = 0.0;
+        MPI_Allreduce(&local_res_sq, &global_res_sq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
         if (!send_reqs.empty()) {
             MPI_Waitall(send_reqs.size(), send_reqs.data(), MPI_STATUSES_IGNORE);
         }
 
-        if (global_delta_sq <= tol * tol * global_norm_sq) {
+        // Warunek stopu oparty na prawdziwym błędzie y - Ux
+        if (global_res_sq <= tol * tol * global_y_sq) {
             bwd_iters_taken = iter + 1;
             break;
         }
@@ -1362,7 +1380,6 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     ilu->last_bwd_iters = bwd_iters_taken;
     if (bwd_iters_taken == max_iter && ilu->rank == 0)
         printf("  WARNING: bwd_sweep did not converge in %d iters\n", max_iter);
-
 }
 
 void ILU_solve(ILUFact* ilu, const double* b, double* x) {
