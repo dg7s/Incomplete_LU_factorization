@@ -16,7 +16,7 @@ using namespace std;
 
 int test_rank_first_row(int rank, int N, int world_size)
 {
-    return rank * N / world_size;
+    return (int)((long long)rank * N / world_size);
 }
 
 // Reads matrix in a MatrixMarket format

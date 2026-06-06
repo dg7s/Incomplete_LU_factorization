@@ -339,8 +339,8 @@ void identify_and_translate_external_cols(const std::vector<int>& lu_rowptr,
 // Helper: Safe rank calculation
 int get_owner_rank(int global_index, int world_size, int N) {
     int rank = 0;
-    while (rank < world_size - 1 && 
-           (rank + 1) * N / world_size <= global_index) {
+    while (rank < world_size - 1 &&
+           (int)((long long)(rank + 1) * N / world_size) <= global_index) {
         rank++;
     }
     return rank;
@@ -978,8 +978,8 @@ struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, co
     ilu->N = N;
 
     // Compute row distribution
-    ilu->local_start = rank * N / world_size;
-    ilu->local_end = (rank + 1) * N / world_size;
+    ilu->local_start = (int)((long long)rank * N / world_size);
+    ilu->local_end = (int)((long long)(rank + 1) * N / world_size);
     ilu->local_n = ilu->local_end - ilu->local_start;
 
     // Rank 0 partition COO data and send local slices to each rank
@@ -996,7 +996,7 @@ struct ILUFact* ILU_factorize(int N, int nnz, const int* row, const int* col, co
             int r = row_global[i];
             
             while (target_rank < world_size - 1 &&
-                   (target_rank + 1) * N / world_size <= r) {
+                   (int)((long long)(target_rank + 1) * N / world_size) <= r) {
                 target_rank++;
             }
             row_slices[target_rank].push_back(r);
@@ -1134,7 +1134,7 @@ void ILU_forward_sweep(ILUFact* ilu, const double* b_perm, double* y_perm) {
     std::vector<double> flat_recv_buf(total_recv, 0.0);
     std::vector<double> flat_send_buf(total_send, 0.0);
 
-    double tol = 1e-8;
+    double tol = 1e-10;
     int max_iter = 1000;
 
     for (int iter = 0; iter < max_iter; iter++) {
@@ -1264,7 +1264,7 @@ void ILU_backward_sweep(ILUFact* ilu, const double* y_perm, double* x_perm) {
     std::vector<double> flat_recv_buf(total_recv, 0.0);
     std::vector<double> flat_send_buf(total_send, 0.0);
 
-    double tol = 1e-8;
+    double tol = 1e-10;
     int max_iter = 1000;
 
     for (int iter = 0; iter < max_iter; iter++) {

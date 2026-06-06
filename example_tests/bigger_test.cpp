@@ -20,7 +20,7 @@ using namespace std;
 
 // ---- Helpers ----------------------------------------------------------------
 
-static int rank_first_row(int r, int N, int P) { return r * N / P; }
+static int rank_first_row(int r, int N, int P) { return (int)((long long)r * N / P); }
 
 static void read_matrix(const char* path, int* N, int* nnz,
                         int** row, int** col, double** val) {
