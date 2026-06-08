@@ -590,9 +590,7 @@ void factorize_separators_pass(ILUFact* ilu, const std::vector<int>& diag_ptr) {
 
         // Pass 1: E-block pivots (global columns < local_start).
         // These must be applied before local lower-tri pivots because their global
-        // column indices are smaller. For band-like matrices, E-block pivot rows
-        // have entries at local L positions — those corrections must land before
-        // the local entries are divided by their own diagonal.
+        // column indices are smaller.
         for (int k = row_start; k < row_end; k++) {
             int col_idx = ilu->lu_col[k];
             if (col_idx < local_n) continue;              // local — handled in pass 2
@@ -729,9 +727,7 @@ void iterative_separator_factorization(ILUFact* ilu) {
     bool converged = false;
 
     // Snapshot of separator lu_val as it stands after factorize_interior (original A values
-    // for those rows).  Must reset before every pass so the L-entry divisions and U-entry
-    // subtractions always start from the same base — without this, repeated calls would
-    // divide L entries by U_ii again each iteration, driving them to zero.
+    // for those rows). 
     const int sep_val_start = ilu->lu_rowptr[ilu->n_int];
     const int sep_val_end   = ilu->lu_rowptr[local_n];
     std::vector<double> orig_sep_lu_val(ilu->lu_val.begin() + sep_val_start,
